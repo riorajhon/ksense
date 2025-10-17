@@ -1,5 +1,5 @@
 const API_KEY = "ak_52ceff5cb293e68556eaac984e9c73c6cdab7144c4f49390";
-const BASE_URL = "https://assessment.ksensetech.com/api/patients"; // Correct endpoint
+const BASE_URL = "https://assessment.ksensetech.com/api/patients";
 
 /**
  * Fetch with retry and exponential backoff
@@ -23,11 +23,9 @@ async function fetchWithRetry(url, options, retries = 5, backoff = 500) {
         continue;
       }
 
-      if (res.status === 404) {
-        throw new Error("404 Not Found – check the endpoint URL");
-      }
-
+      if (res.status === 404) throw new Error("404 Not Found – check endpoint URL");
       if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+
       return await res.json();
 
     } catch (err) {
@@ -40,7 +38,7 @@ async function fetchWithRetry(url, options, retries = 5, backoff = 500) {
 }
 
 /**
- * Fetch all patients with pagination
+ * Fetch all patients safely with logging
  */
 async function fetchAllPatients() {
   let page = 1;
@@ -50,8 +48,19 @@ async function fetchAllPatients() {
   while (hasNext) {
     const url = `${BASE_URL}?page=${page}&limit=20`;
     const data = await fetchWithRetry(url, { headers: { "x-api-key": API_KEY } });
+
+    console.log("Raw API response for page", page, ":", data);
+
+    if (!data || !Array.isArray(data.data)) {
+      console.warn("Skipping page", page, "– data is not an array");
+      hasNext = false;
+      continue;
+    }
+
     allPatients.push(...data.data);
-    hasNext = data.pagination.hasNext;
+
+    // Check pagination safely
+    hasNext = data.pagination && data.pagination.hasNext ? data.pagination.hasNext : false;
     page++;
   }
 
@@ -67,23 +76,27 @@ function parseNumber(value) {
 }
 
 /**
- * Risk scoring functions
+ * Risk scoring functions with strict validation
  */
 function getBloodPressureScore(bp) {
   if (!bp || !bp.includes("/")) return 0;
-  const [systolic, diastolic] = bp.split("/").map(parseNumber);
-  if (systolic === null || diastolic === null) return 0;
+  const [systolicStr, diastolicStr] = bp.split("/");
+  const systolic = parseInt(systolicStr, 10);
+  const diastolic = parseInt(diastolicStr, 10);
+
+  if (isNaN(systolic) || isNaN(diastolic)) return 0;
 
   if (systolic >= 140 || diastolic >= 90) return 4;
   if (systolic >= 130 || diastolic >= 80) return 3;
   if (systolic >= 120 && diastolic < 80) return 2;
   if (systolic < 120 && diastolic < 80) return 1;
+
   return 0;
 }
 
 function getTemperatureScore(temp) {
-  const t = parseNumber(temp);
-  if (t === null) return 0;
+  const t = parseFloat(temp);
+  if (isNaN(t)) return 0;
   if (t <= 99.5) return 0;
   if (t <= 100.9) return 1;
   if (t >= 101) return 2;
@@ -91,12 +104,10 @@ function getTemperatureScore(temp) {
 }
 
 function getAgeScore(age) {
-  const a = parseNumber(age);
-  if (a === null) return 0;
+  const a = parseInt(age, 10);
+  if (isNaN(a)) return 0;
   if (a > 65) return 2;
-  if (a >= 40) return 1;
-  if (a < 40) return 1;
-  return 0;
+  return 1;
 }
 
 /**
@@ -114,8 +125,20 @@ function analyzePatients(patients) {
     const totalScore = bpScore + tempScore + ageScore;
 
     if (totalScore >= 4) highRiskPatients.push(p.patient_id);
-    if (parseNumber(p.temperature) >= 99.6) feverPatients.push(p.patient_id);
-    if (bpScore === 0 || tempScore === 0 || ageScore === 0) dataQualityIssues.push(p.patient_id);
+
+    if (!isNaN(parseFloat(p.temperature)) && parseFloat(p.temperature) >= 99.6) {
+      feverPatients.push(p.patient_id);
+    }
+
+    const bpInvalid = !p.blood_pressure || !p.blood_pressure.includes("/") ||
+      isNaN(parseInt(p.blood_pressure.split("/")[0], 10)) ||
+      isNaN(parseInt(p.blood_pressure.split("/")[1], 10));
+    const tempInvalid = isNaN(parseFloat(p.temperature));
+    const ageInvalid = isNaN(parseInt(p.age, 10));
+
+    if (bpInvalid || tempInvalid || ageInvalid) {
+      dataQualityIssues.push(p.patient_id);
+    }
   });
 
   return { highRiskPatients, feverPatients, dataQualityIssues };
@@ -161,7 +184,7 @@ async function submitResults(alerts, retries = 3) {
   try {
     const patients = await fetchAllPatients();
     console.log(`Fetched ${patients.length} patients`);
-    
+
     const alerts = analyzePatients(patients);
     console.log("Prepared alerts:", alerts);
 
