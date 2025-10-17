@@ -59,7 +59,6 @@ async function fetchAllPatients() {
 
     allPatients.push(...data.data);
 
-    // Check pagination safely
     hasNext = data.pagination && data.pagination.hasNext ? data.pagination.hasNext : false;
     page++;
   }
@@ -68,15 +67,7 @@ async function fetchAllPatients() {
 }
 
 /**
- * Safe number parsing
- */
-function parseNumber(value) {
-  const n = parseFloat(value);
-  return isNaN(n) ? null : n;
-}
-
-/**
- * Risk scoring functions with strict validation
+ * Risk scoring functions
  */
 function getBloodPressureScore(bp) {
   if (!bp || !bp.includes("/")) return 0;
@@ -119,24 +110,31 @@ function analyzePatients(patients) {
   const dataQualityIssues = [];
 
   patients.forEach(p => {
-    const bpScore = getBloodPressureScore(p.blood_pressure);
-    const tempScore = getTemperatureScore(p.temperature);
-    const ageScore = getAgeScore(p.age);
+    // Strict validation for each metric
+    const validBP = p.blood_pressure && p.blood_pressure.includes("/") &&
+                    !isNaN(parseInt(p.blood_pressure.split("/")[0], 10)) &&
+                    !isNaN(parseInt(p.blood_pressure.split("/")[1], 10));
+    const validTemp = !isNaN(parseFloat(p.temperature));
+    const validAge = !isNaN(parseInt(p.age, 10));
+
+    // Compute scores only if values are valid
+    const bpScore = validBP ? getBloodPressureScore(p.blood_pressure) : 0;
+    const tempScore = validTemp ? getTemperatureScore(p.temperature) : 0;
+    const ageScore = validAge ? getAgeScore(p.age) : 0;
     const totalScore = bpScore + tempScore + ageScore;
 
-    if (totalScore >= 4) highRiskPatients.push(p.patient_id);
+    // High-Risk: total score >= 4 AND at least one valid metric exists
+    if (totalScore >= 4 && (validBP || validTemp || validAge)) {
+      highRiskPatients.push(p.patient_id);
+    }
 
-    if (!isNaN(parseFloat(p.temperature)) && parseFloat(p.temperature) >= 99.6) {
+    // Fever: temperature >= 99.6°F
+    if (validTemp && parseFloat(p.temperature) >= 99.6) {
       feverPatients.push(p.patient_id);
     }
 
-    const bpInvalid = !p.blood_pressure || !p.blood_pressure.includes("/") ||
-      isNaN(parseInt(p.blood_pressure.split("/")[0], 10)) ||
-      isNaN(parseInt(p.blood_pressure.split("/")[1], 10));
-    const tempInvalid = isNaN(parseFloat(p.temperature));
-    const ageInvalid = isNaN(parseInt(p.age, 10));
-
-    if (bpInvalid || tempInvalid || ageInvalid) {
+    // Data-quality: any metric invalid
+    if (!validBP || !validTemp || !validAge) {
       dataQualityIssues.push(p.patient_id);
     }
   });
@@ -186,7 +184,10 @@ async function submitResults(alerts, retries = 3) {
     console.log(`Fetched ${patients.length} patients`);
 
     const alerts = analyzePatients(patients);
-    console.log("Prepared alerts:", alerts);
+
+    console.log("High-Risk Patients:", alerts.highRiskPatients);
+    console.log("Fever Patients:", alerts.feverPatients);
+    console.log("Data-Quality Issues:", alerts.dataQualityIssues);
 
     await submitResults(alerts);
     console.log("Assessment submission completed successfully!");
